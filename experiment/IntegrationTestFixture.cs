@@ -1,5 +1,4 @@
 using System.Security.Principal;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -9,14 +8,12 @@ using ReactApp1.Server.Data.Repositories;
 using ReactApp1.Server.Services;
 using Stripe;
 
-namespace ReactApp1.Server.UnitTest;
+namespace ReactApp1.Server.IntegrationTest;
 
 /// <summary>
 /// Shared test fixture for integration tests. Sets up a real DI container with:
-/// - SQLite in-memory database (real EF Core, real repositories)
-/// - Real service implementations wired through DI
-/// - Mocked external boundaries (Stripe payments, SMS)
-///
+/// - PostgreSQL database
+/// - Services wired through DI
 /// Usage: implement IClassFixture&lt;IntegrationTestFixture&gt; on your test class,
 /// then resolve services via GetService&lt;T&gt;().
 /// </summary>
@@ -24,7 +21,9 @@ public class IntegrationTestFixture : IDisposable
 {
     private readonly ServiceProvider _serviceProvider;
     private readonly IServiceScope _scope;
-    private readonly SqliteConnection _connection;
+
+    private const string ConnectionString =
+        "Host=localhost;Port=5432;Database=PSP_IntegrationTest;Username=postgres;Password=1234;";
 
     /// <summary>Mocked Stripe payment intent service. Set up expectations in tests that exercise payments.</summary>
     public Mock<PaymentIntentService> MockPaymentIntentService { get; }
@@ -34,10 +33,6 @@ public class IntegrationTestFixture : IDisposable
 
     public IntegrationTestFixture()
     {
-        // SQLite in-memory database — stays alive as long as the connection is open.
-        _connection = new SqliteConnection("DataSource=:memory:");
-        _connection.Open();
-
         MockPaymentIntentService = new Mock<PaymentIntentService>();
         MockRefundService = new Mock<RefundService>();
 
@@ -45,12 +40,12 @@ public class IntegrationTestFixture : IDisposable
 
         // Database
         services.AddDbContext<AppDbContext>(options =>
-            options.UseSqlite(_connection));
+            options.UseNpgsql(ConnectionString));
 
         // Logging
         services.AddLogging(builder => builder.AddConsole());
 
-        // Repositories — all real implementations backed by the SQLite database.
+        // Repositories
         services.AddScoped<IItemRepository, ItemRepository>();
         services.AddScoped<IEmployeeRepository, EmployeeRepository>();
         services.AddScoped<IReservationRepository, ReservationRepository>();
@@ -68,7 +63,7 @@ public class IntegrationTestFixture : IDisposable
         services.AddScoped<IFullOrderTaxRepository, FullOrderTaxRepository>();
         services.AddScoped<IFullOrderServiceTaxRepository, FullOrderServiceTaxRepository>();
 
-        // Services — real implementations using real repositories.
+        // Services
         services.AddScoped<IItemService, ItemService>();
         services.AddScoped<IEmployeeService, EmployeeService>();
         services.AddScoped<IEstablishmentService, EstablishmentService>();
@@ -80,7 +75,7 @@ public class IntegrationTestFixture : IDisposable
         services.AddScoped<ITaxService, TaxesService>();
         services.AddScoped<IDiscountService, ReactApp1.Server.Services.DiscountService>();
 
-        // Stripe — mocked. These are external payment boundaries, not tested in integration tests.
+        // Stripe - mocked. These are external payment boundaries, not tested in integration tests.
         services.AddScoped(_ => MockPaymentIntentService.Object);
         services.AddScoped(_ => MockRefundService.Object);
         services.AddScoped<IPaymentService, PaymentService>();
@@ -97,8 +92,9 @@ public class IntegrationTestFixture : IDisposable
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateScope();
 
-        // Create the database schema from the EF Core model.
+        // Drop and recreate the database schema to get a clean state each run.
         var dbContext = _scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        dbContext.Database.EnsureDeleted();
         dbContext.Database.EnsureCreated();
     }
 
@@ -128,6 +124,5 @@ public class IntegrationTestFixture : IDisposable
     {
         _scope.Dispose();
         _serviceProvider.Dispose();
-        _connection.Close();
     }
 }
